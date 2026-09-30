@@ -47,6 +47,7 @@ import {
   clampStartLedger,
   createRpcServer,
   LedgerWindowError,
+  validateContractId,
   validateLedgerWindow,
   type LedgerWindow,
 } from "./client.js";
@@ -316,6 +317,11 @@ export async function readContractEvents(
   target: WatchTarget,
   opts: ScanOptions = {},
 ): Promise<ContractScan> {
+  // Validate the contract ID before using it in an RPC filter. This is a
+  // defense-in-depth check; the ID is already validated at config load time.
+  // A malformed ID must not reach the RPC or corrupt the filter chain.
+  validateContractId(target.contractId);
+
   const scan = await paginatedGetEvents(
     server,
     [{ type: "contract", contractIds: [target.contractId] }],

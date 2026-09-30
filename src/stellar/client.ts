@@ -114,6 +114,82 @@ export class LedgerWindowError extends Error {
   }
 }
 
+// ── Contract ID validation ───────────────────────────────────────────────────
+//
+// Contract IDs are loaded at config time and validated there. Runtime validation
+// is added as a defense-in-depth check before they're used in RPC filters, so
+// a malformed ID cannot reach the RPC or corrupt the filter chain.
+//
+// The validation error is bounded by construction — never including raw payloads
+// — so it can be safely logged, surfaced in /status, and included in audit trails.
+
+/** Why a contract ID is invalid. */
+export type ContractIdProblem = "malformed-format" | "empty-value";
+
+/**
+ * Raised when a contract ID fails validation before being sent to the RPC.
+ *
+ * The message is bounded by construction, so it can be surfaced in `/status`,
+ * in logs, and by the scanner CLI without copying a remote payload or the
+ * malformed contract ID itself.
+ */
+export class ContractIdError extends Error {
+  readonly problem: ContractIdProblem;
+
+  constructor(problem: ContractIdProblem, message: string) {
+    super(message);
+    this.name = "ContractIdError";
+    this.problem = problem;
+  }
+}
+
+/** Soroban contract ID format: C + 55 base32 characters (strkey). */
+const CONTRACT_ID_RE = /^C[A-Z2-7]{55}$/;
+
+/**
+ * Truncate a contract ID to a safe, bounded form for logging.
+ * Returns the first character and the last 4 characters: C…XXXX
+ */
+function truncatedContractId(contractId: string): string {
+  if (typeof contractId !== "string") return "C…???";
+  const trimmed = contractId.trim();
+  if (trimmed.length === 0) return "C…(empty)";
+  if (trimmed.length <= 5) return `${trimmed[0]}…`;
+  return `${trimmed[0]}…${trimmed.slice(-4)}`;
+}
+
+/**
+ * Validate a contract ID before it is used in an RPC request.
+ *
+ * Throws a bounded {@link ContractIdError} when the ID is empty, malformed, or
+ * not a string, rather than letting it reach the RPC or corrupt the filter.
+ * Used at the boundary where contract IDs enter RPC requests.
+ *
+ * @param contractId - The contract ID to validate (typically from config)
+ * @throws {ContractIdError} When the contract ID is invalid
+ */
+export function validateContractId(contractId: unknown): void {
+  if (typeof contractId !== "string") {
+    throw new ContractIdError(
+      "empty-value",
+      `contract ID must be a string; got ${typeof contractId}`,
+    );
+  }
+
+  const trimmed = contractId.trim();
+  if (trimmed === "") {
+    throw new ContractIdError("empty-value", "contract ID cannot be empty");
+  }
+
+  if (!CONTRACT_ID_RE.test(trimmed)) {
+    throw new ContractIdError(
+      "malformed-format",
+      `contract ID is not a Soroban contract ID (expected C… strkey, 56 chars); ` +
+        `got ${truncatedContractId(trimmed)}`,
+    );
+  }
+}
+
 /** A ledger sequence we are willing to put into a request. */
 function isLedgerSequence(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;

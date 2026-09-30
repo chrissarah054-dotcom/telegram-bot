@@ -460,3 +460,116 @@ test("paginatedGetEvents: latestLedger is taken from the last response", async (
 
   assert.equal(result.latestLedger, tip2);
 });
+
+
+// ── Contract ID validation in readContractEvents ────────────────────────────
+
+test("readContractEvents: validates contract ID before scanning", async () => {
+  const { readContractEvents } = await import("../dist/stellar/events.js");
+
+  // Create a minimal mock server that will fail if called, proving validation happened first
+  const server = {
+    async getHealth() {
+      throw new Error("getHealth should not be called on invalid contract ID");
+    },
+    async getEvents(_req) {
+      throw new Error("getEvents should not be called on invalid contract ID");
+    },
+  };
+
+  // Valid contract ID should pass validation and proceed to RPC
+  const validTarget = {
+    source: "market",
+    contractId: "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI",
+  };
+
+  // This will fail on getHealth, but that proves validation passed
+  await assert.rejects(
+    () => readContractEvents(server, validTarget, { startLedger: 4_900 }),
+    /getHealth should not be called/,
+  );
+});
+
+test("readContractEvents: rejects invalid contract ID format", async () => {
+  const { readContractEvents } = await import("../dist/stellar/events.js");
+  const { ContractIdError } = await import("../dist/stellar/client.js");
+
+  // Server will never be called due to validation error
+  const server = {
+    async getHealth() {
+      throw new Error("Should not be called");
+    },
+    async getEvents(_req) {
+      throw new Error("Should not be called");
+    },
+  };
+
+  const invalidTargets = [
+    { source: "market", contractId: "INVALID" },
+    { source: "market", contractId: "" },
+    { source: "market", contractId: "G" + "A".repeat(55) }, // Classic account
+  ];
+
+  for (const target of invalidTargets) {
+    await assert.rejects(
+      () => readContractEvents(server, target, { startLedger: 4_900 }),
+      ContractIdError,
+      `should reject ${target.contractId.slice(0, 10)}…`,
+    );
+  }
+});
+
+test("readContractEvents: rejects non-string contract ID", async () => {
+  const { readContractEvents } = await import("../dist/stellar/events.js");
+  const { ContractIdError } = await import("../dist/stellar/client.js");
+
+  // Server will never be called due to validation error
+  const server = {
+    async getHealth() {
+      throw new Error("Should not be called");
+    },
+    async getEvents(_req) {
+      throw new Error("Should not be called");
+    },
+  };
+
+  const invalidTarget = {
+    source: "market",
+    contractId: null, // Non-string type
+  };
+
+  await assert.rejects(
+    () => readContractEvents(server, invalidTarget),
+    ContractIdError,
+  );
+});
+
+test("readContractEvents: validation error has bounded message", async () => {
+  const { readContractEvents } = await import("../dist/stellar/events.js");
+  const { ContractIdError } = await import("../dist/stellar/client.js");
+
+  // Server will never be called due to validation error
+  const server = {
+    async getHealth() {
+      throw new Error("Should not be called");
+    },
+    async getEvents(_req) {
+      throw new Error("Should not be called");
+    },
+  };
+
+  const longInvalidId = "X".repeat(1000); // Very long invalid ID
+  const target = {
+    source: "market",
+    contractId: longInvalidId,
+  };
+
+  try {
+    await readContractEvents(server, target);
+    assert.fail("should have thrown");
+  } catch (err) {
+    assert(err instanceof ContractIdError);
+    // Error message should be bounded, not include the full payload
+    assert(err.message.length < 200, "error message should be bounded");
+  }
+});
