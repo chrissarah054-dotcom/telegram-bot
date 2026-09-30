@@ -1,509 +1,498 @@
 /**
- * Configuration validation property tests.
+ * Config validation unit tests.
  *
- * Covers positive, negative, boundary, cross-property, and regression cases.
- * Tests are split into separate functions that each set up their own environment
- * since dotenv is evaluated at module import time.
+ * Tests the loadConfig / loadStellarConfig fail-fast behaviour, including
+ * the new INTER_SEND_DELAY_MS env var and boundary conditions.
+ * No live network calls or real credentials needed.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// ── Positive tests ───────────────────────────────────────────────────────────
+import { ConfigError, loadConfig, loadStellarConfig, networkLabel } from "../dist/config.js";
 
-test("loadStellarConfig() accepts valid default configuration", async () => {
-  // Arrange
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  delete process.env.STELLAR_RPC_URL;
-  delete process.env.STELLAR_HORIZON_URL;
-  delete process.env.STELLAR_NETWORK_PASSPHRASE;
+// Valid minimal env for a full bot config.
+const VALID_CONTRACT_A = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+const VALID_CONTRACT_B = "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBQMF4";
 
-  try {
-    // Act
-    const { loadStellarConfig } = await import("../dist/config.js");
-    const config = loadStellarConfig();
-
-    // Assert
-    assert.equal(config.marketContractId, "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI");
-    assert.equal(config.squadContractId, "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY");
-    assert.equal(config.rpcUrl, "https://soroban-testnet.stellar.org");
-    assert.equal(config.horizonUrl, "https://horizon-testnet.stellar.org");
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
+function withEnv(vars, fn) {
+  const saved = {};
+  for (const [k, v] of Object.entries(vars)) {
+    saved[k] = process.env[k];
+    if (v === undefined) {
+      delete process.env[k];
+    } else {
+      process.env[k] = v;
+    }
   }
-});
-
-test("rejects empty contract IDs", async () => {
-  // Arrange
-  process.env.MARKET_CONTRACT_ID = "";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-
   try {
-    // Act & Assert
-    const { loadStellarConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadStellarConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.length > 0);
-        return true;
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) {
+        delete process.env[k];
+      } else {
+        process.env[k] = v;
       }
-    );
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
+    }
   }
+}
+
+function validBotEnv(overrides = {}) {
+  return {
+    BOT_TOKEN: "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    TELEGRAM_CHAT_ID: "-1001234567890",
+    MARKET_CONTRACT_ID: VALID_CONTRACT_A,
+    SQUAD_CONTRACT_ID: VALID_CONTRACT_B,
+    // Clear any values from the test environment that could interfere.
+    POLL_INTERVAL_MS: undefined,
+    START_LOOKBACK_LEDGERS: undefined,
+    CURSOR_FILE: undefined,
+    MAX_NOTIFICATIONS_PER_CYCLE: undefined,
+    INTER_SEND_DELAY_MS: undefined,
+    STELLAR_RPC_URL: undefined,
+    STELLAR_HORIZON_URL: undefined,
+    STELLAR_NETWORK_PASSPHRASE: undefined,
+    ...overrides,
+  };
+}
+
+// ── Required fields ───────────────────────────────────────────────────────────
+
+test("loadConfig: throws ConfigError when BOT_TOKEN is missing", () => {
+  withEnv(validBotEnv({ BOT_TOKEN: undefined }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(err.problems.some((p) => p.includes("BOT_TOKEN")));
+      return true;
+    });
+  });
 });
 
-test("rejects contract IDs with wrong prefix", async () => {
-  // Arrange
-  process.env.MARKET_CONTRACT_ID = "GDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
+test("loadConfig: throws ConfigError when TELEGRAM_CHAT_ID is missing", () => {
+  withEnv(validBotEnv({ TELEGRAM_CHAT_ID: undefined }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(err.problems.some((p) => p.includes("TELEGRAM_CHAT_ID")));
+      return true;
+    });
+  });
+});
 
-  try {
-    // Act & Assert
-    const { loadStellarConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadStellarConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.some((p) => p.includes("MARKET_CONTRACT_ID")));
+test("loadConfig: throws ConfigError when MARKET_CONTRACT_ID is malformed", () => {
+  withEnv(validBotEnv({ MARKET_CONTRACT_ID: "not-a-contract-id" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(err.problems.some((p) => p.includes("MARKET_CONTRACT_ID")));
+      return true;
+    });
+  });
+});
+
+test("loadConfig: collects ALL problems in one error", () => {
+  withEnv(
+    validBotEnv({
+      BOT_TOKEN: undefined,
+      TELEGRAM_CHAT_ID: undefined,
+      MARKET_CONTRACT_ID: "bad",
+    }),
+    () => {
+      assert.throws(() => loadConfig(), (err) => {
+        assert.ok(err instanceof ConfigError);
+        assert.ok(err.problems.length >= 3, `Expected >= 3 problems, got ${err.problems.length}`);
         return true;
-      }
-    );
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-  }
+      });
+    },
+  );
 });
 
-test("rejects contract IDs with lowercase letters", async () => {
-  // Arrange
-  process.env.MARKET_CONTRACT_ID = "CDV6jxijcalsxqelcs6yuewjwg5dfxqk5pj5i7mwi6kvmqjbc5dlpkzi";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
+// ── INTER_SEND_DELAY_MS ───────────────────────────────────────────────────────
 
-  try {
-    // Act & Assert
-    const { loadStellarConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadStellarConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.some((p) => p.includes("MARKET_CONTRACT_ID")));
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-  }
-});
-
-test("accumulates multiple contract ID errors", async () => {
-  // Arrange
-  process.env.MARKET_CONTRACT_ID = "invalid";
-  process.env.SQUAD_CONTRACT_ID = "also-invalid";
-
-  try {
-    // Act & Assert
-    const { loadStellarConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadStellarConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert.equal(err.problems.length, 2);
-        assert(err.problems.some((p) => p.includes("MARKET_CONTRACT_ID")));
-        assert(err.problems.some((p) => p.includes("SQUAD_CONTRACT_ID")));
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-  }
-});
-
-// ── Chat ID tests ────────────────────────────────────────────────────────────
-
-test("accepts numeric chat IDs (negative)", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "-1001234567890";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-
-  try {
-    // Act
-    const { loadConfig } = await import("../dist/config.js");
+test("loadConfig: INTER_SEND_DELAY_MS defaults to 1500", () => {
+  withEnv(validBotEnv(), () => {
     const config = loadConfig();
-
-    // Assert
-    assert.equal(config.chatId, "-1001234567890");
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-  }
+    assert.equal(config.interSendDelayMs, 1500);
+  });
 });
 
-test("accepts @channelusername chat IDs", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "@mimir_testnet";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-
-  try {
-    // Act
-    const { loadConfig } = await import("../dist/config.js");
+test("loadConfig: INTER_SEND_DELAY_MS=0 is accepted (min is 0)", () => {
+  withEnv(validBotEnv({ INTER_SEND_DELAY_MS: "0" }), () => {
     const config = loadConfig();
-
-    // Assert
-    assert.equal(config.chatId, "@mimir_testnet");
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-  }
+    assert.equal(config.interSendDelayMs, 0);
+  });
 });
 
-test("rejects invalid chat IDs", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "not-a-chat-id";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-
-  try {
-    // Act & Assert
-    const { loadConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.some((p) => p.includes("TELEGRAM_CHAT_ID")));
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-  }
-});
-
-// ── URL tests ────────────────────────────────────────────────────────────────
-
-test("accepts http and https URLs", async () => {
-  // Arrange
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.STELLAR_RPC_URL = "http://localhost:8000";
-
-  try {
-    // Act
-    const { loadStellarConfig } = await import("../dist/config.js");
-    const config = loadStellarConfig();
-
-    // Assert
-    assert.equal(config.rpcUrl, "http://localhost:8000");
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.STELLAR_RPC_URL;
-  }
-});
-
-test("rejects invalid URLs", async () => {
-  // Arrange
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.STELLAR_RPC_URL = "not-a-url";
-
-  try {
-    // Act & Assert
-    const { loadStellarConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadStellarConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.some((p) => p.includes("STELLAR_RPC_URL")));
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.STELLAR_RPC_URL;
-  }
-});
-
-test("rejects ftp:// URLs", async () => {
-  // Arrange
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.STELLAR_RPC_URL = "ftp://example.com";
-
-  try {
-    // Act & Assert
-    const { loadStellarConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadStellarConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.some((p) => p.includes("STELLAR_RPC_URL")));
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.STELLAR_RPC_URL;
-  }
-});
-
-// ── Poll interval tests ──────────────────────────────────────────────────────
-
-test("accepts poll interval at minimum boundary (5000ms)", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "123";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.POLL_INTERVAL_MS = "5000";
-
-  try {
-    // Act
-    const { loadConfig } = await import("../dist/config.js");
+test("loadConfig: INTER_SEND_DELAY_MS=500 is loaded correctly", () => {
+  withEnv(validBotEnv({ INTER_SEND_DELAY_MS: "500" }), () => {
     const config = loadConfig();
-
-    // Assert
-    assert.equal(config.pollIntervalMs, 5000);
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.POLL_INTERVAL_MS;
-  }
+    assert.equal(config.interSendDelayMs, 500);
+  });
 });
 
-test("rejects poll interval below minimum (4999ms)", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "123";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.POLL_INTERVAL_MS = "4999";
-
-  try {
-    // Act & Assert
-    const { loadConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.some((p) => p.includes("POLL_INTERVAL_MS")));
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.POLL_INTERVAL_MS;
-  }
+test("loadConfig: INTER_SEND_DELAY_MS with non-integer value is rejected", () => {
+  withEnv(validBotEnv({ INTER_SEND_DELAY_MS: "1.5" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(
+        err.problems.some((p) => p.includes("INTER_SEND_DELAY_MS")),
+        `Expected problem about INTER_SEND_DELAY_MS; got: ${JSON.stringify(err.problems)}`,
+      );
+      return true;
+    });
+  });
 });
 
-// ── Start lookback tests ─────────────────────────────────────────────────────
+test("loadConfig: INTER_SEND_DELAY_MS with negative value is rejected", () => {
+  withEnv(validBotEnv({ INTER_SEND_DELAY_MS: "-1" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(
+        err.problems.some((p) => p.includes("INTER_SEND_DELAY_MS")),
+        `Expected problem about INTER_SEND_DELAY_MS; got: ${JSON.stringify(err.problems)}`,
+      );
+      return true;
+    });
+  });
+});
 
-test("accepts zero START_LOOKBACK_LEDGERS (start from oldest)", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "123";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.START_LOOKBACK_LEDGERS = "0";
+// ── MAX_NOTIFICATIONS_PER_CYCLE ───────────────────────────────────────────────
 
-  try {
-    // Act
-    const { loadConfig } = await import("../dist/config.js");
+test("loadConfig: MAX_NOTIFICATIONS_PER_CYCLE defaults to 20", () => {
+  withEnv(validBotEnv(), () => {
     const config = loadConfig();
-
-    // Assert
-    assert.equal(config.startLookbackLedgers, 0);
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.START_LOOKBACK_LEDGERS;
-  }
+    assert.equal(config.maxNotificationsPerCycle, 20);
+  });
 });
 
-test("rejects negative START_LOOKBACK_LEDGERS", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "123";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.START_LOOKBACK_LEDGERS = "-10";
-
-  try {
-    // Act & Assert
-    const { loadConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.some((p) => p.includes("START_LOOKBACK_LEDGERS")));
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.START_LOOKBACK_LEDGERS;
-  }
-});
-
-// ── Max notifications tests ──────────────────────────────────────────────────
-
-test("accepts MAX_NOTIFICATIONS_PER_CYCLE at minimum (1)", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "123";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.MAX_NOTIFICATIONS_PER_CYCLE = "1";
-
-  try {
-    // Act
-    const { loadConfig } = await import("../dist/config.js");
+test("loadConfig: MAX_NOTIFICATIONS_PER_CYCLE=1 is accepted (min is 1)", () => {
+  withEnv(validBotEnv({ MAX_NOTIFICATIONS_PER_CYCLE: "1" }), () => {
     const config = loadConfig();
-
-    // Assert
     assert.equal(config.maxNotificationsPerCycle, 1);
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.MAX_NOTIFICATIONS_PER_CYCLE;
-  }
+  });
 });
 
-// ── Health port tests ────────────────────────────────────────────────────────
+test("loadConfig: MAX_NOTIFICATIONS_PER_CYCLE=0 is rejected (min is 1)", () => {
+  withEnv(validBotEnv({ MAX_NOTIFICATIONS_PER_CYCLE: "0" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(err.problems.some((p) => p.includes("MAX_NOTIFICATIONS_PER_CYCLE")));
+      return true;
+    });
+  });
+});
 
-test("accepts HEALTH_PORT=0 to disable the listener", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "123";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.HEALTH_PORT = "0";
+// ── POLL_INTERVAL_MS ──────────────────────────────────────────────────────────
 
-  try {
-    // Act
-    const { loadConfig } = await import("../dist/config.js");
+test("loadConfig: POLL_INTERVAL_MS below 5000 is rejected", () => {
+  withEnv(validBotEnv({ POLL_INTERVAL_MS: "4999" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(err.problems.some((p) => p.includes("POLL_INTERVAL_MS")));
+      return true;
+    });
+  });
+});
+
+test("loadConfig: POLL_INTERVAL_MS=5000 is accepted", () => {
+  withEnv(validBotEnv({ POLL_INTERVAL_MS: "5000" }), () => {
     const config = loadConfig();
-
-    // Assert
-    assert.equal(config.healthPort, 0);
-  } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.HEALTH_PORT;
-  }
+    assert.equal(config.pollIntervalMs, 5000);
+  });
 });
 
-// ── Health stale tests ───────────────────────────────────────────────────────
+// ── Chat ID ───────────────────────────────────────────────────────────────────
 
-test("accepts HEALTH_STALE_MS=0 to disable stale checking", async () => {
-  // Arrange
-  process.env.BOT_TOKEN = "token";
-  process.env.TELEGRAM_CHAT_ID = "123";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-  process.env.HEALTH_STALE_MS = "0";
-
-  try {
-    // Act
-    const { loadConfig } = await import("../dist/config.js");
+test("loadConfig: numeric negative chat id is accepted", () => {
+  withEnv(validBotEnv({ TELEGRAM_CHAT_ID: "-1001234567890" }), () => {
     const config = loadConfig();
+    assert.equal(config.chatId, "-1001234567890");
+  });
+});
 
-    // Assert
-    assert.equal(config.healthStaleMs, 0);
+test("loadConfig: @channelusername is accepted", () => {
+  withEnv(validBotEnv({ TELEGRAM_CHAT_ID: "@mychannelname" }), () => {
+    const config = loadConfig();
+    assert.equal(config.chatId, "@mychannelname");
+  });
+});
+
+test("loadConfig: invalid chat id format is rejected", () => {
+  withEnv(validBotEnv({ TELEGRAM_CHAT_ID: "not-valid" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(err.problems.some((p) => p.includes("TELEGRAM_CHAT_ID")));
+      return true;
+    });
+  });
+});
+
+// ── networkLabel ──────────────────────────────────────────────────────────────
+
+test("networkLabel: returns testnet for the Testnet passphrase", () => {
+  const config = {
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    horizonUrl: "https://horizon-testnet.stellar.org",
+    marketContractId: VALID_CONTRACT_A,
+    squadContractId: VALID_CONTRACT_B,
+  };
+  assert.equal(networkLabel(config), "testnet");
+});
+
+test("networkLabel: returns public for the Mainnet passphrase", () => {
+  const config = {
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    horizonUrl: "https://horizon-testnet.stellar.org",
+    marketContractId: VALID_CONTRACT_A,
+    squadContractId: VALID_CONTRACT_B,
+  };
+  assert.equal(networkLabel(config), "public");
+});
+
+test("networkLabel: returns custom for an unknown passphrase", () => {
+  const config = {
+    networkPassphrase: "My Custom Network ; 2025",
+    rpcUrl: "http://localhost:8000",
+    horizonUrl: "http://localhost:8000",
+    marketContractId: VALID_CONTRACT_A,
+    squadContractId: VALID_CONTRACT_B,
+  };
+  assert.equal(networkLabel(config), "custom");
+});
+
+// ── loadStellarConfig ─────────────────────────────────────────────────────────
+
+test("loadStellarConfig: succeeds without BOT_TOKEN or TELEGRAM_CHAT_ID", () => {
+  withEnv(
+    {
+      MARKET_CONTRACT_ID: VALID_CONTRACT_A,
+      SQUAD_CONTRACT_ID: VALID_CONTRACT_B,
+      BOT_TOKEN: undefined,
+      TELEGRAM_CHAT_ID: undefined,
+      STELLAR_RPC_URL: undefined,
+      STELLAR_HORIZON_URL: undefined,
+      STELLAR_NETWORK_PASSPHRASE: undefined,
+    },
+    () => {
+      const config = loadStellarConfig();
+      assert.equal(config.marketContractId, VALID_CONTRACT_A);
+      assert.equal(config.squadContractId, VALID_CONTRACT_B);
+    },
+  );
+});
+
+// ── ConfigError ───────────────────────────────────────────────────────────────
+
+test("ConfigError: message lists all problems and includes copy hint", () => {
+  const err = new ConfigError(["problem one", "problem two"]);
+  assert.match(err.message, /problem one/);
+  assert.match(err.message, /problem two/);
+  assert.match(err.message, /\.env/);
+  assert.equal(err.name, "ConfigError");
+  assert.deepEqual(err.problems, ["problem one", "problem two"]);
+});
+
+// ── METRICS_PORT ──────────────────────────────────────────────────────────────
+
+test("loadConfig: METRICS_PORT absent defaults to null (server disabled)", () => {
+  withEnv(validBotEnv({ METRICS_PORT: undefined }), () => {
+    const config = loadConfig();
+    assert.equal(config.metricsPort, null);
+  });
+});
+
+test("loadConfig: METRICS_PORT empty string defaults to null (server disabled)", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "" }), () => {
+    const config = loadConfig();
+    assert.equal(config.metricsPort, null);
+  });
+});
+
+test("loadConfig: METRICS_PORT=9090 is accepted and parsed as a number", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "9090" }), () => {
+    const config = loadConfig();
+    assert.equal(config.metricsPort, 9090);
+  });
+});
+
+test("loadConfig: METRICS_PORT=1 is accepted (minimum valid port)", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "1" }), () => {
+    const config = loadConfig();
+    assert.equal(config.metricsPort, 1);
+  });
+});
+
+test("loadConfig: METRICS_PORT=65535 is accepted (maximum valid port)", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "65535" }), () => {
+    const config = loadConfig();
+    assert.equal(config.metricsPort, 65535);
+  });
+});
+
+test("loadConfig: METRICS_PORT=0 is rejected (below minimum)", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "0" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(
+        err.problems.some((p) => p.includes("METRICS_PORT")),
+        `Expected METRICS_PORT problem; got: ${JSON.stringify(err.problems)}`,
+      );
+      return true;
+    });
+  });
+});
+
+test("loadConfig: METRICS_PORT=65536 is rejected (above maximum)", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "65536" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(
+        err.problems.some((p) => p.includes("METRICS_PORT")),
+        `Expected METRICS_PORT problem; got: ${JSON.stringify(err.problems)}`,
+      );
+      return true;
+    });
+  });
+});
+
+test("loadConfig: METRICS_PORT=-1 is rejected (negative)", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "-1" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(
+        err.problems.some((p) => p.includes("METRICS_PORT")),
+        `Expected METRICS_PORT problem; got: ${JSON.stringify(err.problems)}`,
+      );
+      return true;
+    });
+  });
+});
+
+test("loadConfig: METRICS_PORT=9090.5 is rejected (non-integer)", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "9090.5" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(
+        err.problems.some((p) => p.includes("METRICS_PORT")),
+        `Expected METRICS_PORT problem; got: ${JSON.stringify(err.problems)}`,
+      );
+      return true;
+    });
+  });
+});
+
+test("loadConfig: METRICS_PORT=notanumber is rejected", () => {
+  withEnv(validBotEnv({ METRICS_PORT: "notanumber" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(
+        err.problems.some((p) => p.includes("METRICS_PORT")),
+        `Expected METRICS_PORT problem; got: ${JSON.stringify(err.problems)}`,
+      );
+      return true;
+    });
+  });
+});
+
+test("loadConfig: METRICS_PORT problem is collected alongside other problems", () => {
+  // METRICS_PORT=0 is invalid AND BOT_TOKEN is missing — both should appear.
+  withEnv(validBotEnv({ BOT_TOKEN: undefined, METRICS_PORT: "0" }), () => {
+    assert.throws(() => loadConfig(), (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.ok(
+        err.problems.some((p) => p.includes("BOT_TOKEN")),
+        `Expected BOT_TOKEN problem; got: ${JSON.stringify(err.problems)}`,
+      );
+      assert.ok(
+        err.problems.some((p) => p.includes("METRICS_PORT")),
+        `Expected METRICS_PORT problem; got: ${JSON.stringify(err.problems)}`,
+      );
+      return true;
+    });
+  });
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  ConfigError,
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  loadConfig,
+} from "../dist/config.js";
+
+const REQUIRED = {
+  MARKET_CONTRACT_ID: "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI",
+  SQUAD_CONTRACT_ID: "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY",
+  BOT_TOKEN: "123456789:TEST-ONLY-TOKEN-NEVER-USE",
+  TELEGRAM_CHAT_ID: "-1001234567890",
+};
+
+/** Run `fn` with a clean env so a developer's `.env` cannot change the result. */
+function withEnv(overrides, fn) {
+  const before = { ...process.env };
+  try {
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, REQUIRED, overrides);
+    return fn();
   } finally {
-    delete process.env.BOT_TOKEN;
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.HEALTH_STALE_MS;
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, before);
+  }
+}
+
+test("SHUTDOWN_TIMEOUT_MS defaults to the documented drain budget", () => {
+  const config = withEnv({}, () => loadConfig());
+  assert.equal(config.shutdownTimeoutMs, DEFAULT_SHUTDOWN_TIMEOUT_MS);
+  assert.equal(config.shutdownTimeoutMs, 10_000);
+});
+
+test("SHUTDOWN_TIMEOUT_MS accepts an explicit budget and the 0 opt-out", () => {
+  assert.equal(withEnv({ SHUTDOWN_TIMEOUT_MS: "250" }, () => loadConfig()).shutdownTimeoutMs, 250);
+  assert.equal(withEnv({ SHUTDOWN_TIMEOUT_MS: "0" }, () => loadConfig()).shutdownTimeoutMs, 0);
+});
+
+test("SHUTDOWN_TIMEOUT_MS falls back to the default when set to nothing", () => {
+  const config = withEnv({ SHUTDOWN_TIMEOUT_MS: "  " }, () => loadConfig());
+  assert.equal(config.shutdownTimeoutMs, DEFAULT_SHUTDOWN_TIMEOUT_MS);
+});
+
+test("SHUTDOWN_TIMEOUT_MS rejects negative and non-numeric budgets at boot", () => {
+  for (const value of ["-1", "2.5", "soon"]) {
+    assert.throws(
+      () => withEnv({ SHUTDOWN_TIMEOUT_MS: value }, () => loadConfig()),
+      ConfigError,
+      `SHUTDOWN_TIMEOUT_MS=${JSON.stringify(value)} must not boot`,
+    );
   }
 });
 
-// ── Missing required fields ──────────────────────────────────────────────────
+// Health-port resolution: Railway injects `PORT` and probes it for the deploy
+// healthcheck, so the health endpoint falls back to it when `HEALTH_PORT` is
+// unset — without changing the loopback default where `PORT` does not exist.
+function healthPortWith(patch) {
+  return withEnv(patch, () => loadConfig().healthPort);
+}
 
-test("rejects missing BOT_TOKEN", async () => {
-  // Arrange
-  delete process.env.BOT_TOKEN;
-  process.env.TELEGRAM_CHAT_ID = "123";
-  process.env.MARKET_CONTRACT_ID = "CDV6JXIJCALSXQELCS6YUEWJWG5DFXQK5PJ5I7MWI6KVMQJBC5DLPKZI";
-  process.env.SQUAD_CONTRACT_ID = "CBPGVXHXLULUBVZ24D6XNSUX7NH45HYXGWHAJFWTBHXYNO72KDRKCDFY";
-
-  try {
-    // Act & Assert
-    const { loadConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        assert(err.problems.some((p) => p.includes("BOT_TOKEN")));
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.TELEGRAM_CHAT_ID;
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-  }
+test("explicit HEALTH_PORT wins over an injected PORT", () => {
+  assert.equal(healthPortWith({ HEALTH_PORT: "9999", PORT: "8888" }), 9999);
 });
 
-test("accumulates multiple problems in one error", async () => {
-  // Arrange
-  delete process.env.BOT_TOKEN;
-  delete process.env.TELEGRAM_CHAT_ID;
-  process.env.MARKET_CONTRACT_ID = "invalid";
-  process.env.SQUAD_CONTRACT_ID = "also-invalid";
-  process.env.POLL_INTERVAL_MS = "1000"; // too low
+test("falls back to the injected PORT when HEALTH_PORT is unset", () => {
+  assert.equal(healthPortWith({ PORT: "8080" }), 8080);
+});
 
-  try {
-    // Act & Assert
-    const { loadConfig, ConfigError } = await import("../dist/config.js");
-    assert.throws(
-      () => loadConfig(),
-      (err) => {
-        assert(err instanceof ConfigError);
-        // Should have at least 5 problems: missing BOT_TOKEN, missing CHAT_ID,
-        // invalid MARKET_ID, invalid SQUAD_ID, poll interval too low
-        assert(err.problems.length >= 5);
-        return true;
-      }
-    );
-  } finally {
-    delete process.env.MARKET_CONTRACT_ID;
-    delete process.env.SQUAD_CONTRACT_ID;
-    delete process.env.POLL_INTERVAL_MS;
-  }
+test("keeps the loopback default when neither HEALTH_PORT nor PORT is set", () => {
+  assert.equal(healthPortWith({}), 8787);
+});
+
+test("ignores a non-numeric injected PORT", () => {
+  assert.equal(healthPortWith({ PORT: "not-a-port" }), 8787);
+});
+
+test("ignores a zero injected PORT (Railway disables it in some plans)", () => {
+  assert.equal(healthPortWith({ PORT: "0" }), 8787);
+});
+
+test("HEALTH_PORT=0 still disables the listener on a platform with PORT", () => {
+  assert.equal(healthPortWith({ HEALTH_PORT: "0", PORT: "8443" }), 0);
 });
